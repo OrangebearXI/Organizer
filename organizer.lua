@@ -584,23 +584,50 @@ end
 ---==============================================================================================================================================
 
 function get_all_duplicates_direct()
-    -- Define the bags we want to search (excluding wardrobes and temporary)
-    local external_bags = {1, 2, 4, 5, 6, 7, 9} -- safe, storage, locker, satchel, sack, case, safe2
+    -- Define the bags we want to search (including inventory this time)
+    local search_bags = {0, 1, 2, 4, 5, 6, 7, 9} -- inventory, safe, storage, locker, satchel, sack, case, safe2
+    local external_bags = {1, 2, 4, 5, 6, 7, 9} -- everything except inventory (for moving)
     
     local moved_count = 0
     local failed_count = 0
     
     org_message("Starting duplicate item retrieval...")
     
-    -- Simple approach: just scan each external bag and move everything that's also in inventory
-    local inventory_items = {}
+    -- Build a registry of ALL items across ALL bags
+    local item_registry = {}
     local current_items = Items.new()
     
-    -- First, catalog what's in inventory by name
-    if current_items[0] then
-        for index, item in current_items[0]:it() do
-            if not item:annihilated() then
-                inventory_items[item.name] = true
+    -- Scan all bags to find items that exist in multiple locations
+    for _, bag_id in pairs(search_bags) do
+        if current_items[bag_id] then
+            for index, item in current_items[bag_id]:it() do
+                if not item:annihilated() then
+                    local item_name = item.name
+                    
+                    if not item_registry[item_name] then
+                        item_registry[item_name] = {
+                            locations = {},
+                            external_instances = {},
+                            total_locations = 0
+                        }
+                    end
+                    
+                    -- Track this location
+                    if not item_registry[item_name].locations[bag_id] then
+                        item_registry[item_name].locations[bag_id] = 0
+                        item_registry[item_name].total_locations = item_registry[item_name].total_locations + 1
+                    end
+                    item_registry[item_name].locations[bag_id] = item_registry[item_name].locations[bag_id] + 1
+                    
+                    -- Store external instances for moving (don't store inventory items)
+                    if bag_id ~= 0 then
+                        table.insert(item_registry[item_name].external_instances, {
+                            bag_id = bag_id,
+                            index = index,
+                            item = item
+                        })
+                    end
+                end
             end
         end
     end
@@ -610,30 +637,26 @@ function get_all_duplicates_direct()
     local inventory_used = current_items[0]._info.n
     
     org_message("Inventory space: " .. inventory_used .. "/" .. inventory_max .. " (" .. (inventory_max - inventory_used) .. " free)")
-    org_message("Items in inventory: " .. table.length(inventory_items))
     
-    -- Now go through each external bag and move items that are duplicated in inventory
-    for _, bag_id in pairs(external_bags) do
-        if current_items[bag_id] then
-            org_verbose("Checking " .. res.bags[bag_id].english .. "...")
+    -- Find items that exist in 2+ locations and move all external copies
+    local duplicate_count = 0
+    local total_to_move = 0
+    
+    for item_name, data in pairs(item_registry) do
+        -- Only process items that exist in 2+ total locations
+        if data.total_locations > 1 then
+            duplicate_count = duplicate_count + 1
+            total_to_move = total_to_move + #data.external_instances
             
-            -- Get a fresh copy of items for this bag
-            local fresh_items = Items.new()
-            
-            -- Convert to a list so we can safely iterate while moving items
-            local items_to_move = {}
-            for index, item in fresh_items[bag_id]:it() do
-                if not item:annihilated() and inventory_items[item.name] then
-                    table.insert(items_to_move, {
-                        index = index,
-                        item = item,
-                        bag_id = bag_id
-                    })
-                end
+            -- Show which bags contain this item
+            local bag_list = {}
+            for bag_id, count in pairs(data.locations) do
+                table.insert(bag_list, res.bags[bag_id].english .. "(" .. count .. ")")
             end
+            org_verbose("Duplicate found: " .. item_name .. " in " .. table.concat(bag_list, ", "))
             
-            -- Move each item
-            for _, move_data in pairs(items_to_move) do
+            -- Move ALL external instances
+            for _, instance in pairs(data.external_instances) do
                 -- Check if we have inventory space
                 local fresh_check = Items.new()
                 if fresh_check[0]._info.n >= inventory_max then
@@ -641,21 +664,23 @@ function get_all_duplicates_direct()
                     break
                 end
                 
+                local item = instance.item
+                local bag_id = instance.bag_id
+                local item_index = instance.index
+                
+                org_verbose("Moving " .. item_name .. " from " .. res.bags[bag_id].english .. " slot " .. item_index)
+                
                 -- Get fresh item reference
                 local fresh_items_for_move = Items.new()
-                if fresh_items_for_move[move_data.bag_id] and fresh_items_for_move[move_data.bag_id][move_data.index] then
-                    local item_name = fresh_items_for_move[move_data.bag_id][move_data.index].name
-                    
-                    org_verbose("Moving " .. item_name .. " from " .. res.bags[move_data.bag_id].english .. " slot " .. move_data.index)
-                    
-                    local success = fresh_items_for_move[move_data.bag_id][move_data.index]:move(0, 0x52)
+                if fresh_items_for_move[bag_id] and fresh_items_for_move[bag_id][item_index] then
+                    local success = fresh_items_for_move[bag_id][item_index]:move(0, 0x52, item.count)
                     if success then
                         moved_count = moved_count + 1
-                        org_message("✓ Moved " .. item_name .. " from " .. res.bags[move_data.bag_id].english)
+                        org_message("✓ Moved " .. item_name .. " from " .. res.bags[bag_id].english)
                         simulate_item_delay()
                     else
                         failed_count = failed_count + 1
-                        org_warning("✗ Failed to move " .. item_name .. " from " .. res.bags[move_data.bag_id].english)
+                        org_warning("✗ Failed to move " .. item_name .. " from " .. res.bags[bag_id].english)
                     end
                 else
                     org_verbose("Item no longer found at expected location (may have been moved already)")
@@ -664,7 +689,12 @@ function get_all_duplicates_direct()
         end
     end
     
-    org_message("Duplicate retrieval complete! Moved " .. moved_count .. " items, " .. failed_count .. " failed")
+    if duplicate_count == 0 then
+        org_message("No duplicate items found in specified bags!")
+    else
+        org_message("Found " .. duplicate_count .. " duplicate item types with " .. total_to_move .. " total instances")
+        org_message("Final result: " .. moved_count .. " items moved, " .. failed_count .. " failed")
+    end
 end
 
 -- Keep the original function for debugging, but make it call the direct version
