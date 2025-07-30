@@ -89,7 +89,7 @@ organizer_items = {
 
 ### Alldupes (Added by Orangebear)
 ```
-alldupes
+//org alldupes
 ```
 
 Scans all storage bags (Safe, Safe2, Storage, Locker, Satchel, Sack, Case) and retrieves ALL instances of items that are duplicated across multiple locations into your inventory. This is useful for consolidating duplicate items for manual organization.
